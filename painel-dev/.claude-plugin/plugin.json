@@ -1,6 +1,6 @@
 {
   "name": "painel-dev",
-  "version": "0.7.4",
+  "version": "0.9.0",
   "description": "Aba lateral com projeto, plataforma (VTEX IO, FastStore, Deco, Wake), git e cache do prompt",
   "types": "./types/index.d.ts"
 }

@@ -10,8 +10,25 @@ import type {
   Explicacao,
   Painel,
   Plataforma,
+  PassoZen,
   Preferencias,
+  StatusInfo,
+  TarefaZen,
 } from '../types'
+import type { Timer } from 'claude-code'
+import {
+  DESCRICAO_ZEN,
+  ESQUEMA_ZEN,
+  FERRAMENTA_ZEN,
+  INSTRUCAO_ZEN,
+  PASSOS_VISIVEIS,
+  TEMPO_CONCLUIDO_MS,
+  formatarDecorrido,
+  paraStatus,
+  passosVisiveis,
+  porcentagem,
+  rotuloDoPasso,
+} from './lib/zen'
 import { alterarSettingsClaude, pastaHome, pintarWindowsTerminal } from './lib/configuracoes'
 import type { ResultadoTerminal } from './lib/configuracoes'
 import { NOME_TEMA, TEMAS, paraEsquemaWindowsTerminal, paraTemaClaude } from './lib/temas'
@@ -22,6 +39,20 @@ const TITULO = 'Painel dev'
 const COR_DESTAQUE = '#A78BFA'
 const COR_TEXTO_ATIVO = '#16131F'
 const ICONE_DEV = '\u{F0322}'
+
+const ICONES = {
+  modelo: '\u{F2DB}',
+  pasta: '\u{F07B}',
+  branch: '\u{E725}',
+  contexto: '\u{F0E4}',
+  limite5h: '\u{F017}',
+  limite7d: '\u{F073}',
+  cache: '\u{F1C0}',
+}
+
+const ROTULOS_LIMITE: Record<string, string> = { five_hour: '5h', seven_day: '7d' }
+const LARGURA_BARRINHA = 8
+const TAREFAS_EM_FUNDO = /\b\d+ (?:shells?|monitors?|background tasks?)\b/
 const SECOES_RESUMO = /\*\*(O que foi feito|Decisões|Pra aprender):\*\*/
 const TTL_PADRAO_MIN = 60
 const ESPERA_DEPLOY_MS = 7 * 60000
@@ -111,7 +142,125 @@ const preferencias = atom(
   { shape: 'preferencias-1' },
 )
 
+const status = atom({ plugin: 'painel-dev', key: 'status' } as const, null, { shape: 'status-1' })
+const paneAberta = atom({ plugin: 'painel-dev', key: 'paneAberta' } as const, false)
+const zenLigado = atom({ plugin: 'painel-dev', key: 'zenLigado' } as const, false)
+const zenRecolhido = atom({ plugin: 'painel-dev', key: 'zenRecolhido' } as const, false)
+const zenTarefa = atom({ plugin: 'painel-dev', key: 'zenTarefa' } as const, null as TarefaZen | null, {
+  shape: 'zen-1',
+})
+const zenRelogio = atom({ plugin: 'painel-dev', key: 'zenRelogio' } as const, 0)
+
+let relogioZen: Timer | null = null
+let ultimoPrompt = ''
+
+function pararRelogioZen(): void {
+  relogioZen?.cancel()
+  relogioZen = null
+}
+
+async function iniciarTarefaZen($: EngineInterface, titulo: string): Promise<void> {
+  const inicio = Date.now()
+
+  await update($, zenTarefa, () => ({ titulo: titulo || 'Trabalhando', inicio, fim: null, passos: [] }))
+  await update($, zenRelogio, () => inicio)
+
+  pararRelogioZen()
+  relogioZen = $.clock.every(1000, () => {
+    void update($, zenRelogio, () => Date.now())
+  })
+}
+
+async function atualizarPassosZen($: EngineInterface, passos: PassoZen[], titulo?: string): Promise<void> {
+  if ((await read($, zenTarefa)) === null) await iniciarTarefaZen($, ultimoPrompt)
+
+  await update($, zenTarefa, tarefa => (tarefa === null ? tarefa : { ...tarefa, titulo: titulo || tarefa.titulo, passos }))
+}
+
+async function registrarFerramentaZen($: EngineInterface): Promise<void> {
+  await $.tool
+    .register({ name: FERRAMENTA_ZEN, description: DESCRICAO_ZEN, inputSchema: ESQUEMA_ZEN })
+    .catch(() => undefined)
+}
+
+async function definirZen($: EngineInterface, isLigado: boolean): Promise<void> {
+  await update($, zenLigado, () => isLigado)
+  await $.store.set('zenLigado', isLigado)
+
+  if (isLigado) {
+    await registrarFerramentaZen($)
+  } else {
+    pararRelogioZen()
+    await update($, zenTarefa, () => null)
+  }
+
+  await avisar(
+    $,
+    isLigado ? 'Zen ligado: vale a partir da próxima mensagem.' : 'Zen desligado: as ferramentas voltam a aparecer.',
+  )
+}
+
+async function concluirTarefaZen($: EngineInterface): Promise<void> {
+  const tarefa = await read($, zenTarefa)
+
+  if (tarefa === null || tarefa.fim !== null) return
+
+  const fim = Date.now()
+
+  pararRelogioZen()
+  await update($, zenTarefa, atual => (atual === null ? atual : { ...atual, fim }))
+  await update($, zenRelogio, () => fim)
+
+  $.clock.after(TEMPO_CONCLUIDO_MS, () => {
+    void update($, zenTarefa, atual => (atual !== null && atual.fim === fim ? null : atual))
+  })
+}
+
 let esforcoEscolhido: Esforco | null = null
+
+function formatarTokens(total: number): string {
+  if (total >= 1_000_000) return `${(total / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+  if (total >= 1000) return `${Math.round(total / 1000)}k`
+
+  return String(total)
+}
+
+function formatarDuracao(ms: number): string {
+  const minutos = Math.max(0, Math.floor(ms / 60000))
+
+  if (minutos < 60) return `${minutos}min`
+
+  const horas = Math.floor(minutos / 60)
+
+  if (horas < 24) return `${horas}h${String(minutos % 60).padStart(2, '0')}`
+
+  return `${Math.floor(horas / 24)}d${String(horas % 24).padStart(2, '0')}h`
+}
+
+function corDoUso(pct: number): 'error' | 'warning' | 'success' {
+  return pct >= 90 ? 'error' : pct >= 70 ? 'warning' : 'success'
+}
+
+async function atualizarStatus($: EngineInterface): Promise<void> {
+  const uso = await tentar(() => $.session.usage(), null)
+
+  if (!uso) return
+
+  const info: StatusInfo = {
+    contextoPct: uso.context.percent ?? null,
+    contextoTokens: uso.context.tokens ?? null,
+    janela: uso.context.window,
+    limites: uso.rateLimits
+      .filter(limite => ROTULOS_LIMITE[limite.kind] !== undefined)
+      .map(limite => ({
+        rotulo: ROTULOS_LIMITE[limite.kind] ?? limite.kind,
+        pct: Math.round(limite.percentUsed),
+        zeraEm: limite.resetsAt ? Date.parse(limite.resetsAt) : null,
+      })),
+  }
+
+  await update($, status, () => info)
+}
 
 async function tentar<T>(acao: () => Promise<T>, padrao: T): Promise<T> {
   try {
@@ -598,7 +747,19 @@ async function atualizar($: EngineInterface): Promise<void> {
 
 async function abrir($: EngineInterface, destino: Aba): Promise<void> {
   await update($, aba, () => destino)
+  await update($, paneAberta, () => true)
   await $.ui.open({ id: PANE, title: TITULO })
+}
+
+async function alternarPainel($: EngineInterface): Promise<void> {
+  if (await read($, paneAberta)) {
+    await update($, paneAberta, () => false)
+    await $.ui.close({ id: PANE })
+
+    return
+  }
+
+  await abrir($, await read($, aba))
 }
 
 export const register: Register = on => {
@@ -639,9 +800,229 @@ export const register: Register = on => {
       void update($, agora, () => Date.now())
     })
 
-    void $.ui.open({ id: PANE, title: TITULO })
+    void abrir($, 'painel')
     void atualizar($)
     void carregarPreferencias($)
+    void atualizarStatus($)
+
+    await $.command.register({
+      name: 'zen',
+      description: 'Liga ou desliga o modo Zen (esconde as ferramentas e mostra a faixa de progresso)',
+    })
+
+    if ((await $.store.get('zenLigado')) === true) {
+      await update($, zenLigado, () => true)
+      await registrarFerramentaZen($)
+    }
+
+    return next(e)
+  })
+
+  on('command.run', { command: 'zen' }, async $ => {
+    const isLigado = !(await read($, zenLigado))
+
+    await definirZen($, isLigado)
+
+    return {
+      text: isLigado
+        ? 'Modo Zen ligado: a faixa de progresso aparece a partir da próxima mensagem.'
+        : 'Modo Zen desligado.',
+    }
+  })
+
+  on('tool.call', { tool: 'mcp__painel-dev__progresso_zen' }, async ($, e) => {
+    const entrada = e as unknown as { titulo?: unknown; passos?: unknown }
+    const brutos: unknown[] = Array.isArray(entrada.passos) ? entrada.passos : []
+    const passos: PassoZen[] = brutos.flatMap((bruto, indice) => {
+      const passo = bruto as { texto?: unknown; status?: unknown }
+
+      return typeof passo.texto === 'string'
+        ? [{ id: `zen-${indice}`, texto: passo.texto, status: paraStatus(passo.status) }]
+        : []
+    })
+
+    await atualizarPassosZen($, passos, typeof entrada.titulo === 'string' ? entrada.titulo : undefined)
+
+    const feitos = passos.filter(passo => passo.status === 'feito').length
+
+    return { result: `Faixa atualizada: ${feitos} de ${passos.length} passos feitos.` }
+  }).catch(() => ({ result: 'Não deu para atualizar a faixa do Zen; siga com a tarefa normalmente.' }))
+
+  on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
+    if ((await read($, zenTarefa)) !== null) {
+      await atualizarPassosZen(
+        $,
+        e.todos.map((tarefa, indice) => ({
+          id: `todo-${indice}`,
+          texto: tarefa.status === 'in_progress' ? tarefa.activeForm || tarefa.content : tarefa.content,
+          status: paraStatus(tarefa.status),
+        })),
+      )
+    }
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', { tool: 'TaskCreate' }, async ($, e, next) => {
+    const resultado = await next(e)
+    const id = (resultado.result as { task?: { id?: string } } | undefined)?.task?.id
+    const tarefa = await read($, zenTarefa)
+
+    if (id !== undefined && tarefa !== null) {
+      const passo: PassoZen = { id, texto: e.subject, status: 'pendente' }
+
+      await atualizarPassosZen($, [...tarefa.passos.filter(item => item.id !== id), passo])
+    }
+
+    return resultado
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', { tool: 'TaskUpdate' }, async ($, e, next) => {
+    const resultado = await next(e)
+    const tarefa = await read($, zenTarefa)
+
+    if (resultado.deny !== undefined || resultado.isError === true || tarefa === null) return resultado
+
+    const passos =
+      e.status === 'deleted'
+        ? tarefa.passos.filter(passo => passo.id !== e.taskId)
+        : tarefa.passos.map(passo =>
+            passo.id === e.taskId
+              ? { ...passo, texto: e.subject ?? passo.texto, status: e.status ? paraStatus(e.status) : passo.status }
+              : passo,
+          )
+
+    await atualizarPassosZen($, passos)
+
+    return resultado
+  }).catch(($, e, next) => next(e))
+
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    const { Box } = $.ui.resolve(e)
+
+    return (await read($, zenLigado)) ? <Box display="none" /> : next(e)
+  })
+
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    const { Box } = $.ui.resolve(e)
+
+    return (await read($, zenLigado)) ? <Box display="none" /> : next(e)
+  })
+
+  on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    const { Box } = $.ui.resolve(e)
+
+    return (await read($, zenLigado)) ? <Box display="none" /> : next(e)
+  })
+
+  on('ui.render', { component: 'ToolProgress' }, async ($, e, next) => {
+    const { Box } = $.ui.resolve(e)
+
+    return (await read($, zenLigado)) ? <Box display="none" /> : next(e)
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+
+    const [isLigado, tarefa, isRecolhido, relogio] = await Promise.all([
+      read($, zenLigado),
+      read($, zenTarefa),
+      read($, zenRecolhido),
+      read($, zenRelogio),
+    ])
+
+    if (!isLigado || tarefa === null) return next(e)
+
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const colunas = Math.max(30, e.viewport?.columns ?? 80)
+    const pct = porcentagem(tarefa)
+    const isConcluida = tarefa.fim !== null
+    const corDaFaixa = isConcluida ? 'success' : COR_DESTAQUE
+    const larguraBarra = Math.max(8, Math.min(40, colunas - 32))
+    const cheios = Math.round((larguraBarra * pct) / 100)
+    const marca = isConcluida ? '✔' : ICONE_DEV
+
+    const barraZen = (
+      <Text>
+        <Text color={corDaFaixa}>{'█'.repeat(cheios)}</Text>
+        <Text dimColor>{'░'.repeat(larguraBarra - cheios)}</Text>
+      </Text>
+    )
+
+    const botaoRecolher = (
+      <Button
+        key="zen-recolher"
+        plain
+        dimColor
+        label={isRecolhido ? '[+]' : '[–]'}
+        onPress={() => {
+          void update($, zenRecolhido, atual => !atual)
+        }}
+      />
+    )
+
+    const titulo = (
+      <Text color={corDaFaixa} bold wrap="truncate">
+        {marca} {tarefa.titulo}
+      </Text>
+    )
+
+    if (isRecolhido) {
+      return (
+        <Box flexDirection="row" borderStyle="round" borderColor={corDaFaixa} paddingX={1} columnGap={1}>
+          {titulo}
+          {barraZen}
+          <Text bold color={corDaFaixa}>{`${pct}%`}</Text>
+          {botaoRecolher}
+        </Box>
+      )
+    }
+
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor={corDaFaixa} paddingX={1}>
+        <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
+          {titulo}
+          <Box flexDirection="row" columnGap={1} flexShrink={0}>
+            <Text dimColor>{formatarDecorrido((tarefa.fim ?? relogio) - tarefa.inicio)}</Text>
+            {botaoRecolher}
+          </Box>
+        </Box>
+        <Box flexDirection="row" columnGap={1}>
+          <Text dimColor>{rotuloDoPasso(tarefa).padEnd(14)}</Text>
+          {barraZen}
+          <Text bold color={corDaFaixa}>
+            {`${pct}%`.padStart(4)}
+          </Text>
+        </Box>
+        {passosVisiveis(tarefa).map(passo => {
+          const isAgora = passo.status === 'fazendo'
+          const isFeito = passo.status === 'feito'
+
+          return (
+            <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
+              <Text
+                color={isFeito ? 'success' : isAgora ? COR_DESTAQUE : undefined}
+                bold={isAgora}
+                dimColor={passo.status === 'pendente'}
+                wrap="truncate"
+              >
+                {isFeito ? '✔' : isAgora ? '●' : '○'} {passo.texto}
+              </Text>
+              <Text color={isAgora ? COR_DESTAQUE : undefined} dimColor={!isAgora}>
+                {isFeito ? 'Feito' : isAgora ? 'Fazendo' : 'Próximo'}
+              </Text>
+            </Box>
+          )
+        })}
+        {tarefa.passos.length > PASSOS_VISIVEIS && (
+          <Text dimColor>+ {tarefa.passos.length - PASSOS_VISIVEIS} passos</Text>
+        )}
+      </Box>
+    )
+  })
+
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    await update($, paneAberta, () => false)
 
     return next(e)
   })
@@ -708,8 +1089,16 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     await update($, arquivosTurno, () => [])
 
-    return next(e)
-  })
+    const texto = e.text.trim()
+    const isDigitado = e.origin.kind === 'composer' && texto !== '' && !texto.startsWith('/')
+
+    if (!isDigitado || !(await read($, zenLigado))) return next(e)
+
+    ultimoPrompt = (texto.split('\n')[0] ?? '').slice(0, 120)
+    await iniciarTarefaZen($, ultimoPrompt)
+
+    return next({ ...e, context: [...(e.context ?? []), INSTRUCAO_ZEN] })
+  }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const resultado = await next(e)
@@ -750,8 +1139,108 @@ export const register: Register = on => {
     }
 
     void atualizar($)
+    void atualizarStatus($)
+    await concluirTarefaZen($)
 
     return resultado
+  })
+
+  on('ui.render', { component: 'PromptHint' }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const [dados, infoStatus, infoCache, infoPref, instante, isAberta] = await Promise.all([
+      read($, painel),
+      read($, status),
+      read($, cache),
+      read($, preferencias),
+      read($, agora),
+      read($, paneAberta),
+    ])
+
+    const separador = <Text dimColor>{'  │  '}</Text>
+
+    const barrinha = (pct: number) => {
+      const cheios = Math.round((Math.min(100, Math.max(0, pct)) / 100) * LARGURA_BARRINHA)
+
+      return (
+        <Text>
+          <Text color={corDoUso(pct)}>{'█'.repeat(cheios)}</Text>
+          <Text dimColor>{'░'.repeat(LARGURA_BARRINHA - cheios)}</Text>{' '}
+        </Text>
+      )
+    }
+
+    const restanteCache =
+      infoCache.ultimaRespostaEm === null ? null : infoCache.ttlMin * 60000 - (instante - infoCache.ultimaRespostaEm)
+    const tarefasEmFundo = e.props.hint.match(TAREFAS_EM_FUNDO)?.[0]
+
+    const botaoPainel = (
+      <Button key="alternar-painel" plain label="painel" onPress={() => void alternarPainel($)}>
+        <Text color={COR_DESTAQUE} bold>
+          {ICONE_DEV} painel {isAberta ? '▼' : '▲'}
+        </Text>
+      </Button>
+    )
+
+    return (
+      <Box flexDirection="column" flexGrow={1}>
+        <Box flexDirection="row" justifyContent="space-between" flexGrow={1} columnGap={1}>
+          <Text wrap="truncate">
+            <Text color={COR_DESTAQUE}>{ICONES.modelo} </Text>
+            <Text>{nomeDoModelo(infoPref.modelo)}</Text>
+            {separador}
+            <Text color="suggestion">{ICONES.pasta} </Text>
+            <Text>{dados?.projeto ?? '—'}</Text>
+            {dados?.branch ? (
+              <Text>
+                {separador}
+                <Text color="success">
+                  {ICONES.branch} {dados.branch}
+                </Text>
+              </Text>
+            ) : null}
+          </Text>
+          {botaoPainel}
+        </Box>
+
+        {infoStatus !== null && (
+          <Text wrap="truncate">
+            <Text color={COR_DESTAQUE}>{ICONES.contexto} </Text>
+            {infoStatus.contextoPct !== null && barrinha(infoStatus.contextoPct)}
+            <Text bold color={corDoUso(infoStatus.contextoPct ?? 0)}>
+              {Math.round(infoStatus.contextoPct ?? 0)}%
+            </Text>
+            {infoStatus.contextoTokens !== null && (
+              <Text dimColor>
+                {' '}
+                {formatarTokens(infoStatus.contextoTokens)}/{formatarTokens(infoStatus.janela)}
+              </Text>
+            )}
+            {infoStatus.limites.map(limite => (
+              <Text>
+                {separador}
+                <Text color={COR_DESTAQUE}>{limite.rotulo === '5h' ? ICONES.limite5h : ICONES.limite7d} </Text>
+                <Text>{limite.rotulo} </Text>
+                <Text bold color={corDoUso(limite.pct)}>
+                  {limite.pct}%
+                </Text>
+                {limite.zeraEm !== null && (
+                  <Text dimColor> zera em {formatarDuracao(limite.zeraEm - instante)}</Text>
+                )}
+              </Text>
+            ))}
+            {restanteCache !== null && (
+              <Text>
+                {separador}
+                <Text color={restanteCache > 0 ? 'success' : 'error'}>{ICONES.cache} </Text>
+                <Text dimColor>cache {restanteCache > 0 ? formatarDuracao(restanteCache) : 'expirado'}</Text>
+              </Text>
+            )}
+          </Text>
+        )}
+
+        {tarefasEmFundo && <Text dimColor>⎿ {tarefasEmFundo} · /tasks para gerenciar</Text>}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -765,6 +1254,7 @@ export const register: Register = on => {
       read($, deploy),
       read($, preferencias),
     ])
+    const isZenLigado = await read($, zenLigado)
 
     const titulo = (texto: string) => (
       <Text color={COR_DESTAQUE} bold>
@@ -1398,6 +1888,19 @@ export const register: Register = on => {
                   › {modo.nome}: {modo.descricao}
                 </Text>
               ))}
+            </Box>,
+          )}
+
+          {secao(
+            'Modo Zen',
+            <Box flexDirection="column">
+              <Text dimColor>Esconde as chamadas de ferramenta da conversa e mostra uma faixa</Text>
+              <Text dimColor>de progresso acima do prompt, com os passos da tarefa.</Text>
+              <Box flexDirection="row" flexWrap="wrap" columnGap={2} marginTop={1}>
+                {botao('zen-ligado', 'Ligado', isZenLigado, acao($, () => definirZen($, true)))}
+                {botao('zen-desligado', 'Desligado', !isZenLigado, acao($, () => definirZen($, false)))}
+              </Box>
+              <Text dimColor>Atalho: /zen</Text>
             </Box>,
           )}
 

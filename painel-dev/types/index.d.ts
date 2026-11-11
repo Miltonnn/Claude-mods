@@ -52,6 +52,34 @@ export type Explicacao = {
   aprender: string[]
 }
 
+export type Limite = {
+  rotulo: string
+  pct: number
+  zeraEm: number | null
+}
+
+export type StatusInfo = {
+  contextoPct: number | null
+  contextoTokens: number | null
+  janela: number
+  limites: Limite[]
+}
+
+export type StatusPasso = 'pendente' | 'fazendo' | 'feito'
+
+export type PassoZen = {
+  id: string
+  texto: string
+  status: StatusPasso
+}
+
+export type TarefaZen = {
+  titulo: string
+  inicio: number
+  fim: number | null
+  passos: PassoZen[]
+}
+
 export type DeployInfo = {
   app: string | null
   publicadoEm: Record<string, number>
@@ -68,6 +96,12 @@ declare module 'claude-code' {
       aba: Aba
       deploy: Shaped<DeployInfo>
       preferencias: Shaped<Preferencias>
+      status: Shaped<StatusInfo | null>
+      paneAberta: boolean
+      zenLigado: boolean
+      zenRecolhido: boolean
+      zenTarefa: Shaped<TarefaZen | null>
+      zenRelogio: number
     }
   }
 }
