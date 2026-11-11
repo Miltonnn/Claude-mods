@@ -1,0 +1,5 @@
+{
+  "name": "guarda-comandos",
+  "version": "0.1.0",
+  "description": "Bloqueia git commit/push/add amplo e vtex deploy -f; pede confirmacao antes de comandos VTEX que mexem em producao"
+}
