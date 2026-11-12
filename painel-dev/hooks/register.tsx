@@ -31,13 +31,21 @@ import {
 } from './lib/zen'
 import { alterarSettingsClaude, pastaHome, pintarWindowsTerminal } from './lib/configuracoes'
 import type { ResultadoTerminal } from './lib/configuracoes'
-import { NOME_TEMA, TEMAS, paraEsquemaWindowsTerminal, paraTemaClaude } from './lib/temas'
+import {
+  COR_CLAUDE,
+  COR_FUNDO_ESCURO,
+  COR_FUNDO_PAINEL,
+  NOME_TEMA,
+  TEMAS,
+  paraEsquemaWindowsTerminal,
+  paraTemaClaude,
+} from './lib/temas'
 import type { Paleta } from './lib/temas'
 
 const PANE = 'painel-dev'
 const TITULO = 'Painel dev'
-const COR_DESTAQUE = '#A78BFA'
-const COR_TEXTO_ATIVO = '#16131F'
+const COR_DESTAQUE = COR_CLAUDE
+const COR_TEXTO_ATIVO = COR_FUNDO_ESCURO
 const ICONE_DEV = '\u{F0322}'
 
 const ICONES = {
@@ -745,21 +753,26 @@ async function atualizar($: EngineInterface): Promise<void> {
   await update($, painel, () => dados)
 }
 
-async function abrir($: EngineInterface, destino: Aba): Promise<void> {
+async function abrir($: EngineInterface, destino: Aba): Promise<string | null> {
   await update($, aba, () => destino)
-  await update($, paneAberta, () => true)
-  await $.ui.open({ id: PANE, title: TITULO })
+  const resultado = await $.ui.open({ id: PANE, title: TITULO, backgroundColor: COR_FUNDO_PAINEL })
+  await update($, paneAberta, () => resultado.isPlaced)
+
+  return resultado.isPlaced ? null : resultado.reason
 }
 
 async function alternarPainel($: EngineInterface): Promise<void> {
-  if (await read($, paneAberta)) {
+  const isVisivel = (await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)
+
+  if (isVisivel) {
     await update($, paneAberta, () => false)
     await $.ui.close({ id: PANE })
 
     return
   }
 
-  await abrir($, await read($, aba))
+  const motivo = await abrir($, await read($, aba))
+  if (motivo) $.ui.toast(`Painel não abriu: ${motivo}`)
 }
 
 export const register: Register = on => {
@@ -1021,6 +1034,12 @@ export const register: Register = on => {
     )
   })
 
+  on('ui.press', { plugin: 'painel-dev', element: 'alternar-painel' }, async ($, e) => {
+    await alternarPainel($)
+
+    return { element: e.element }
+  })
+
   on('ui.close', { id: PANE }, async ($, e, next) => {
     await update($, paneAberta, () => false)
 
@@ -1174,7 +1193,7 @@ export const register: Register = on => {
     const tarefasEmFundo = e.props.hint.match(TAREFAS_EM_FUNDO)?.[0]
 
     const botaoPainel = (
-      <Button key="alternar-painel" plain label="painel" onPress={() => void alternarPainel($)}>
+      <Button key="alternar-painel" plain label="painel" onPress={() => undefined}>
         <Text color={COR_DESTAQUE} bold>
           {ICONE_DEV} painel {isAberta ? '▼' : '▲'}
         </Text>

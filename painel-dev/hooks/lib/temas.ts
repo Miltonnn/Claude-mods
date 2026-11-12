@@ -12,15 +12,19 @@ export type Paleta = {
 
 export const NOME_TEMA = 'painel-dev'
 
+export const COR_CLAUDE = '#d97757'
+export const COR_FUNDO_ESCURO = '#141413'
+export const COR_FUNDO_PAINEL = '#0d0d0c'
+
 export const TEMAS: readonly Paleta[] = [
   {
-    slug: 'econverse-roxo',
-    nome: 'Econverse Roxo',
-    fundo: '#16131f',
-    texto: '#e6e1f5',
-    destaque: '#a78bfa',
-    normal: ['#231e33', '#f2668b', '#5fd3a0', '#f5c26b', '#7aa2f7', '#a78bfa', '#67d4e0', '#cfc8e6'],
-    brilhante: ['#4b4466', '#ff85a4', '#7ee6b6', '#ffd48a', '#9bb8ff', '#c4b0ff', '#8be4ee', '#f4f1fb'],
+    slug: 'econverse-claude',
+    nome: 'Econverse Claude',
+    fundo: COR_FUNDO_ESCURO,
+    texto: '#f0eee6',
+    destaque: COR_CLAUDE,
+    normal: ['#262624', '#e5675e', '#6fbf8e', '#e8b45a', '#7aa2f7', COR_CLAUDE, '#67c4cf', '#c2c0b6'],
+    brilhante: ['#4a4843', '#f08a80', '#8fd6a9', '#f3c97d', '#9bb8ff', '#eb9a7c', '#8bd8e0', '#faf9f5'],
   },
   {
     slug: 'dracula',
