@@ -52,6 +52,16 @@ export type Explicacao = {
   aprender: string[]
 }
 
+export type LeituraGuiada = {
+  alvo: string
+  inicio: number
+  etapa: number
+  pergunta: string | null
+  equivocos: string[]
+  conceitos: string[]
+  concluida: boolean
+}
+
 export type Limite = {
   rotulo: string
   pct: number
@@ -92,6 +102,7 @@ declare module 'claude-code' {
       cache: Shaped<CacheInfo>
       agora: number
       explicacao: Shaped<Explicacao | null>
+      leitura: Shaped<LeituraGuiada | null>
       arquivosTurno: string[]
       aba: Aba
       deploy: Shaped<DeployInfo>

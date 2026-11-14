@@ -8,6 +8,7 @@ import type {
   DeployInfo,
   Esforco,
   Explicacao,
+  LeituraGuiada,
   Painel,
   Plataforma,
   PassoZen,
@@ -29,6 +30,15 @@ import {
   porcentagem,
   rotuloDoPasso,
 } from './lib/zen'
+import {
+  DESCRICAO_LEITURA,
+  ESQUEMA_LEITURA,
+  ETAPAS_LEITURA,
+  FERRAMENTA_LEITURA,
+  aplicarEntrada,
+  instrucaoLeitura,
+  novaLeitura,
+} from './lib/leitura'
 import { alterarSettingsClaude, pastaHome, pintarWindowsTerminal } from './lib/configuracoes'
 import type { ResultadoTerminal } from './lib/configuracoes'
 import {
@@ -137,6 +147,9 @@ const agora = atom({ plugin: 'painel-dev', key: 'agora' } as const, 0)
 const explicacao = atom({ plugin: 'painel-dev', key: 'explicacao' } as const, null, {
   shape: 'explicacao-1',
 })
+const leitura = atom({ plugin: 'painel-dev', key: 'leitura' } as const, null as LeituraGuiada | null, {
+  shape: 'leitura-1',
+})
 const arquivosTurno = atom({ plugin: 'painel-dev', key: 'arquivosTurno' } as const, [] as string[])
 const aba = atom({ plugin: 'painel-dev', key: 'aba' } as const, 'painel' as Aba)
 const deploy = atom(
@@ -188,6 +201,12 @@ async function atualizarPassosZen($: EngineInterface, passos: PassoZen[], titulo
 async function registrarFerramentaZen($: EngineInterface): Promise<void> {
   await $.tool
     .register({ name: FERRAMENTA_ZEN, description: DESCRICAO_ZEN, inputSchema: ESQUEMA_ZEN })
+    .catch(() => undefined)
+}
+
+async function registrarFerramentaLeitura($: EngineInterface): Promise<void> {
+  await $.tool
+    .register({ name: FERRAMENTA_LEITURA, description: DESCRICAO_LEITURA, inputSchema: ESQUEMA_LEITURA })
     .catch(() => undefined)
 }
 
@@ -828,8 +847,48 @@ export const register: Register = on => {
       await registrarFerramentaZen($)
     }
 
+    await $.command.register({
+      name: 'ler-codigo',
+      description: 'Liga a leitura guiada (Tech Lead) para um arquivo; sem argumento, encerra a leitura',
+      argumentHint: '<arquivo ou trecho>',
+    })
+
+    if ((await read($, leitura)) !== null) await registrarFerramentaLeitura($)
+
     return next(e)
   })
+
+  on('command.run', { command: 'ler-codigo' }, async ($, e) => {
+    const alvo = e.args.trim()
+
+    if (alvo === '') {
+      const isAtiva = (await read($, leitura)) !== null
+
+      await update($, leitura, () => null)
+
+      return { text: isAtiva ? 'Leitura guiada encerrada.' : 'Use /ler-codigo <arquivo ou trecho> para começar.' }
+    }
+
+    await update($, leitura, () => novaLeitura(alvo))
+    await registrarFerramentaLeitura($)
+    await abrir($, 'explicacao')
+
+    return {
+      text: `Leitura guiada ligada para ${alvo}. Mande uma mensagem (ex.: "vamos") para começar; /ler-codigo sem argumento encerra.`,
+    }
+  })
+
+  on('tool.call', { tool: 'mcp__painel-dev__leitura_guiada' }, async ($, e) => {
+    const atual = await read($, leitura)
+
+    if (atual === null) return { result: 'Nenhuma leitura guiada ativa; siga normalmente.' }
+
+    const proxima = aplicarEntrada(atual, e)
+
+    await update($, leitura, () => proxima)
+
+    return { result: `Aba atualizada: etapa ${proxima.etapa} de ${ETAPAS_LEITURA.length}.` }
+  }).catch(() => ({ result: 'Não deu para atualizar a aba Explicação; siga com a leitura normalmente.' }))
 
   on('command.run', { command: 'zen' }, async $ => {
     const isLigado = !(await read($, zenLigado))
@@ -1111,12 +1170,20 @@ export const register: Register = on => {
     const texto = e.text.trim()
     const isDigitado = e.origin.kind === 'composer' && texto !== '' && !texto.startsWith('/')
 
-    if (!isDigitado || !(await read($, zenLigado))) return next(e)
+    if (!isDigitado) return next(e)
 
-    ultimoPrompt = (texto.split('\n')[0] ?? '').slice(0, 120)
-    await iniciarTarefaZen($, ultimoPrompt)
+    const contexto = [...(e.context ?? [])]
+    const leituraAtiva = await read($, leitura)
 
-    return next({ ...e, context: [...(e.context ?? []), INSTRUCAO_ZEN] })
+    if (leituraAtiva !== null) contexto.push(instrucaoLeitura(leituraAtiva.alvo))
+
+    if (await read($, zenLigado)) {
+      ultimoPrompt = (texto.split('\n')[0] ?? '').slice(0, 120)
+      await iniciarTarefaZen($, ultimoPrompt)
+      contexto.push(INSTRUCAO_ZEN)
+    }
+
+    return contexto.length === (e.context ?? []).length ? next(e) : next({ ...e, context: contexto })
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
@@ -1274,6 +1341,7 @@ export const register: Register = on => {
       read($, preferencias),
     ])
     const isZenLigado = await read($, zenLigado)
+    const infoLeitura = await read($, leitura)
 
     const titulo = (texto: string) => (
       <Text color={COR_DESTAQUE} bold>
@@ -1447,12 +1515,73 @@ export const register: Register = on => {
       )
     }
 
+    const abaLeitura = (dadosLeitura: LeituraGuiada) => (
+      <Box flexDirection="column">
+        <Box flexDirection="column" marginBottom={1}>
+          <Text bold>Leitura guiada</Text>
+          <Text>{dadosLeitura.alvo}</Text>
+          <Text dimColor>
+            {dadosLeitura.concluida
+              ? 'Concluída'
+              : `Etapa ${dadosLeitura.etapa} de ${ETAPAS_LEITURA.length}`} · começou{' '}
+            {formatarHa(Math.max(0, instante - dadosLeitura.inicio))}
+          </Text>
+        </Box>
+        {secao(
+          'Etapas',
+          <Box flexDirection="column">
+            {ETAPAS_LEITURA.map((etapa, indice) => {
+              const numero = indice + 1
+              const isFeita = dadosLeitura.concluida || numero < dadosLeitura.etapa
+              const isAtual = !dadosLeitura.concluida && numero === dadosLeitura.etapa
+
+              return (
+                <Text color={isFeita ? 'success' : isAtual ? COR_DESTAQUE : undefined} dimColor={!isFeita && !isAtual}>
+                  {isFeita ? '✓' : isAtual ? '▸' : '○'} {numero}. {etapa}
+                </Text>
+              )
+            })}
+          </Box>,
+        )}
+        {dadosLeitura.pergunta !== null &&
+          secao(
+            'Pergunta em aberto',
+            <Box flexDirection="column">
+              <Text>{dadosLeitura.pergunta}</Text>
+              <Text dimColor>Responda no chat; tente raciocinar antes de pedir a resposta.</Text>
+            </Box>,
+          )}
+        {dadosLeitura.equivocos.length > 0 &&
+          secao(
+            'Equívocos corrigidos',
+            <Box flexDirection="column">
+              {dadosLeitura.equivocos.map(item => (
+                <Text>• {item}</Text>
+              ))}
+            </Box>,
+          )}
+        {dadosLeitura.conceitos.length > 0 &&
+          secao(
+            'Conceitos para estudar',
+            <Box flexDirection="column">
+              {dadosLeitura.conceitos.map(item => (
+                <Text>• {item}</Text>
+              ))}
+            </Box>,
+          )}
+        <Text dimColor>/ler-codigo sem argumento encerra e volta ao resumo da task.</Text>
+      </Box>
+    )
+
     const abaExplicacao = () => {
+      if (infoLeitura !== null) return abaLeitura(infoLeitura)
+
       if (infoExplicacao === null) {
         return (
           <Box flexDirection="column">
             <Text dimColor>Nenhuma alteração nesta sessão ainda.</Text>
             <Text dimColor>Quando o Claude terminar uma task, o resumo aparece aqui.</Text>
+            <Text dimColor>Para estudar um arquivo com perguntas: /ler-codigo &lt;arquivo&gt;</Text>
           </Box>
         )
       }
